@@ -1,0 +1,14 @@
+{
+  "name": "pi-packages",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal pi extensions and resources. Install this repository as one pi package to load everything under packages/*.",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./packages/*/extensions/*.ts"],
+    "skills": ["./packages/*/skills/*"],
+    "prompts": ["./packages/*/prompts/*.md"],
+    "themes": ["./packages/*/themes/*.json"]
+  }
+}

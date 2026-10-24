@@ -1,0 +1,15 @@
+{
+  "name": "pi-clear",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Adds /clear: move the current session file to the Windows Recycle Bin, then start a fresh session",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./extensions/clear.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
