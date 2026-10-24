@@ -1,43 +1,89 @@
-# pi 配置迁移包
+# pi-packages
 
-由 `/migrate` 生成。
+我平时写的一些 pi 扩展和资源。把它们整理成了一个 monorepo，根目录本身就是一个聚合包，装一次就能把 `packages/*` 下面所有的扩展、skills、提示词和主题全部加载进来。
 
-| 目录 | 还原到 |
-|---|---|
-| `agent/` | `~/.pi/agent/` |
-| `agent-secrets/` | `~/.pi/agent/`（凭证明文，别外传） |
-| `agents/` | `~/.agents/`（共享 skills） |
-| `packages-local/` | 本地 pi package 源码，还原时以自身路径安装 |
+## 包含的包
 
-## 新机器步骤
+| 包 | 命令 | 说明 |
+|---|---|---|
+| [`pi-clear`](packages/pi-clear/README.md) | `/clear` | 把当前会话文件移入 Windows 回收站，然后开个新会话 |
+| [`pi-migrate`](packages/pi-migrate/README.md) | `/migrate` | 把本机的 pi 配置和数据打包导出到当前目录，顺便带个一键还原脚本 |
 
-1. 安装 pi（Node >= 22.19）：
+这两个包都用到了 Windows 特性（回收站 API 和 PowerShell 还原脚本），所以目前只能在 Windows 上跑。
 
-   ```powershell
-   npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-   ```
+## 目录结构
 
-   另需 Git for Windows（bash 工具依赖）。
+```text
+pi-packages/
+├── package.json              # 聚合包：通过 pi 清单汇总 packages/* 下的所有资源
+├── pnpm-workspace.yaml
+├── README.md
+└── packages/
+    ├── pi-clear/
+    │   ├── package.json
+    │   ├── README.md
+    │   └── extensions/clear.ts
+    └── pi-migrate/
+        ├── package.json
+        ├── README.md
+        ├── extensions/migrate.ts
+        └── scripts/dev-run.ts
+```
 
-2. 还原配置：
+根目录 `package.json` 里的 `pi` 字段负责做聚合：
 
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File .\restore.ps1
-   ```
+```json
+{
+  "pi": {
+    "extensions": ["./packages/*/extensions/*.ts"],
+    "skills": ["./packages/*/skills/*"],
+    "prompts": ["./packages/*/prompts/*.md"],
+    "themes": ["./packages/*/themes/*.json"]
+  }
+}
+```
 
-   已有文件会先备份为 `*.bak-<时间戳>`。
+以后想加新包的话，按这个结构放进去就能自动被识别，当然子包也支持单独安装。
 
-3. 验证：
+## 安装
 
-   ```bash
-   pi mcp list     # MCP 服务器是否 connected
-   pi list         # 已安装的 package
-   pi              # 检查模型、/skills、/settings
-   ```
+需要 Node.js >= 22.19，以及 Windows 环境（因为部分包依赖系统特性）。
 
+```bash
+# 推荐做法：在根目录下整体安装，加载全部资源
+pi install ./            # 可以用相对路径或绝对路径
 
-## 注意
+# 或者只装你需要的单个包
+pi install ./packages/pi-clear
+pi install ./packages/pi-migrate
 
-- `agent-secrets/` 是明文 API key / OAuth token，勿提交公开仓库；也可以不用它，在新机器上重新登录。
-- 本包不含 `bin/`（平台相关二进制）与 `sessions/`（会话历史）。
-- 若新机器用 `PI_CODING_AGENT_DIR` 改了配置目录，请按该变量指向的位置还原。
+# 临时试用，不写配置文件
+pi -e ./packages/pi-clear
+```
+
+装完之后验证一下：
+
+```bash
+pi list                  # 查看已安装的 package
+pi                       # 进 TUI 看看 /clear 和 /migrate 是不是都能用了
+```
+
+默认情况下，安装记录会写进 `~/.pi/agent/settings.json`。如果加了 `--local` 参数，就会写入当前项目的 `.pi/settings.json`（记得先给项目授权信任才会加载）。
+
+## 开发与调试
+
+```bash
+pnpm install             # 仓库本身没啥运行时依赖，主要用来统一管理
+```
+
+- 改完扩展之后，重启 pi（或者重新开个会话）就能直接生效。
+- `pi-migrate` 支持脱离 pi 环境单独测试导出逻辑：
+  ```bash
+  node packages/pi-migrate/scripts/dev-run.ts <目标目录>
+  ```
+
+各包的具体用法和限制看各自目录下的 `packages/*/README.md`。
+
+## 许可证
+
+MIT
