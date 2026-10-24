@@ -1,5 +1,4 @@
-import { exportConfig, formatReport } from "../extensions/migrate.ts";
+import { exportConfig, exportDirName, formatReport } from "../extensions/migrate.ts";
 
-const dest = process.argv[2] ?? `${process.env.USERPROFILE}/pi-migrate-devtest`;
-const result = exportConfig({ dest, withSecrets: true, withSessions: false });
-console.log(formatReport(result));
+const dest = process.argv[2] ?? `./${exportDirName()}`;
+console.log(formatReport(exportConfig(dest)));

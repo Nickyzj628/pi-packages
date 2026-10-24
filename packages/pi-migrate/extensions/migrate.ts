@@ -4,11 +4,7 @@
  * 仅 Windows：还原脚本只生成 restore.ps1。
  *
  * 用法：
- *   /migrate                    导出到 ~/pi-migrate-<时间戳>/
- *   /migrate --with-sessions    连会话历史一起导出
- *   /migrate --no-secrets       不导出 auth.json / mcp-auth.json
- *   /migrate --yes              跳过确认
- *   /migrate <目录>             指定导出目录（须不存在）
+ *   /migrate    在当前目录新建 pi-migrate-yyyyMMdd-HHmmss/ 并导出（不接受参数，不二次确认）
  *
  * 导出结构：
  *   <dest>/agent/           -> ~/.pi/agent/（settings / mcp / models / extensions / skills / prompts / themes / AGENTS.md…）
@@ -20,12 +16,12 @@
  *   <dest>/manifest.json    -> 导出清单
  *   <dest>/README.md        -> 新机器操作步骤
  *
- * 永不导出：bin/（rg.exe、fd.exe 等平台相关二进制）。sessions/ 默认不导出。
+ * 永不导出：bin/（rg.exe、fd.exe 等平台相关二进制）与 sessions/（会话历史）。
  */
 
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 /** ~/.pi/agent 下的单文件配置。 */
@@ -48,19 +44,8 @@ const AGENT_DIRS = ["extensions", "skills", "prompts", "themes"];
 /** 凭证文件：只放进 agent-secrets/，方便单独处置。 */
 const SECRET_FILES = ["auth.json", "mcp-auth.json"];
 
-export interface ExportOptions {
-	/** 目标目录；相对路径按当前工作目录解析。 */
-	dest: string;
-	/** 是否导出 auth.json / mcp-auth.json。 */
-	withSecrets: boolean;
-	/** 是否导出会话历史。 */
-	withSessions: boolean;
-}
-
 interface ExportEntry {
 	label: string;
-	from: string;
-	to: string;
 	files: number;
 	bytes: number;
 }
@@ -70,7 +55,7 @@ export interface ExportResult {
 	entries: ExportEntry[];
 	/** 个人设置里声明的 pi package 来源。 */
 	packages: string[];
-	/** 存在但按要求跳过的内容。 */
+	/** 存在但未导出的内容。 */
 	skipped: string[];
 }
 
@@ -80,20 +65,14 @@ function agentDir(): string {
 	return join(homedir(), ".pi", "agent");
 }
 
-function sessionDir(agent: string): string {
-	const override = process.env.PI_CODING_AGENT_SESSION_DIR;
-	if (override) return resolve(override.replace(/^~(?=$|[\\/])/, homedir()));
-	return join(agent, "sessions");
-}
-
-function stamp(): string {
-	const d = new Date();
+/** 导出目录名：pi-migrate-yyyyMMdd-HHmmss。 */
+export function exportDirName(date = new Date()): string {
 	const pad = (n: number) => String(n).padStart(2, "0");
-	return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
-}
-
-function isNonEmptyDir(path: string): boolean {
-	return existsSync(path) && readdirSync(path).length > 0;
+	return [
+		"pi-migrate",
+		`${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`,
+		`${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`,
+	].join("-");
 }
 
 function measure(path: string): { files: number; bytes: number } {
@@ -125,7 +104,7 @@ function copyEntry(from: string, to: string, options: { skipNodeModules?: boolea
 			!(options.skipNodeModules === true && /[\\/](node_modules|\.git)([\\/]|$)/.test(src)),
 	});
 	const { files, bytes } = measure(to);
-	return { label: basename(to), from, to, files, bytes };
+	return { label: basename(to), files, bytes };
 }
 
 /** 相对路径按 settings.json 所在目录解析，与 pi 的规则一致。 */
@@ -138,7 +117,19 @@ function isLocalSource(source: string): boolean {
 	return /^[.~\\/]/.test(source) || /^[A-Za-z]:[\\/]/.test(source);
 }
 
-/** 复制 settings.json；剔除旧机器上的本地 package 绝对路径，还原后由 pi install 重新写入。 */
+/** child 与 parent 相同，或位于 parent 内部。 */
+function isInside(child: string, parent: string): boolean {
+	const rel = relative(parent, child);
+	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/** settings.json 里 packages 条目的来源：字符串，或带 source 字段的对象。 */
+function packageSource(item: unknown): string | undefined {
+	if (typeof item === "string") return item;
+	return (item as { source?: string } | null)?.source;
+}
+
+/** 复制 settings.json；剔除旧机器上的本地 package 路径，还原后由 pi install 重新写入。 */
 function copySettings(from: string, to: string, dropSources: string[]): ExportEntry {
 	mkdirSync(dirname(to), { recursive: true });
 	let text = readFileSync(from, "utf-8");
@@ -146,10 +137,7 @@ function copySettings(from: string, to: string, dropSources: string[]): ExportEn
 		try {
 			const parsed = JSON.parse(text) as { packages?: unknown };
 			if (Array.isArray(parsed.packages)) {
-				const kept = parsed.packages.filter((item: unknown) => {
-					const source = typeof item === "string" ? item : (item as { source?: unknown } | null)?.source;
-					return typeof source !== "string" || !dropSources.includes(source);
-				});
+				const kept = parsed.packages.filter((item) => !dropSources.includes(packageSource(item) ?? ""));
 				if (kept.length === 0) delete parsed.packages;
 				else parsed.packages = kept;
 				text = `${JSON.stringify(parsed, null, 2)}\n`;
@@ -160,67 +148,66 @@ function copySettings(from: string, to: string, dropSources: string[]): ExportEn
 	}
 	writeFileSync(to, text);
 	const { files, bytes } = measure(to);
-	return { label: basename(to), from, to, files, bytes };
+	return { label: basename(to), files, bytes };
 }
 
 function readPackages(settingsPath: string): string[] {
 	try {
-		const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as { packages?: unknown };
-		if (!Array.isArray(parsed.packages)) return [];
-		return parsed.packages
-			.map((item) => {
-				if (typeof item === "string") return item;
-				if (item && typeof item === "object" && typeof (item as { source?: unknown }).source === "string") {
-					return (item as { source: string }).source;
-				}
-				return undefined;
-			})
-			.filter((item): item is string => typeof item === "string" && item.length > 0);
+		const { packages } = JSON.parse(readFileSync(settingsPath, "utf-8")) as { packages?: unknown };
+		if (!Array.isArray(packages)) return [];
+		return packages
+			.map(packageSource)
+			.filter((source): source is string => typeof source === "string" && source.length > 0);
 	} catch {
 		return [];
 	}
 }
 
 /**
- * 导出本机配置。只读源目录，写操作全部发生在 dest 下。
+ * 导出本机配置到 dest。只读源目录，写操作全部发生在 dest 下。
  * 同步实现：配置体积通常很小，避免在命令处理里引入并发复杂度。
  */
-export function exportConfig(options: ExportOptions): ExportResult {
-	const dest = resolve(options.dest);
+export function exportConfig(target: string): ExportResult {
+	let dest = resolve(target);
 	const agent = agentDir();
-	if (dest === agent || dest.startsWith(agent + sep)) {
-		throw new Error("导出目录不能位于 pi 配置目录内");
-	}
-	if (isNonEmptyDir(dest)) {
-		throw new Error(`目标目录已存在且非空：${dest}`);
+	if (isInside(dest, agent) || isInside(agent, dest)) {
+		throw new Error("导出目录不能是 pi 配置目录或它的子目录");
 	}
 
 	const entries: ExportEntry[] = [];
 	const skipped: string[] = [];
 	mkdirSync(dest, { recursive: true });
+	// 统一成真实路径，避免 8.3 短路径（如 ADMINI~1）让下面的包含关系判断失效。
+	dest = realpathSync(dest);
 
 	// 1. 个人设置里的 pi package：本地路径的源码一并带走，并在导出的 settings 里剔除旧机器路径
 	const packages = readPackages(join(agent, "settings.json"));
 	/** 导出清单里的包来源；本地包以 `local:<名字>` 记录。 */
 	const recorded: string[] = [];
 	const localSources: string[] = [];
+	const localSlugs: string[] = [];
 	for (const source of packages) {
 		if (!isLocalSource(source)) {
 			recorded.push(source);
 			continue;
 		}
 		localSources.push(source);
-		const absolute = resolveLocal(source, agent);
+		const absolute = realpathSync(resolveLocal(source, agent));
 		if (!existsSync(absolute)) {
 			skipped.push(`本地包（路径不存在）：${source}`);
 			continue;
 		}
 		const slug = basename(absolute);
-		copyEntry(absolute, join(dest, "packages-local", slug), { skipNodeModules: true });
+		const to = join(dest, "packages-local", slug);
+		// 包源码与导出位置重叠时无法复制（自己拷进自己），只能请用户手动处理。
+		if (isInside(to, absolute) || isInside(absolute, to)) {
+			skipped.push(`本地包（与导出目录重叠，需手动拷贝）：${source}`);
+			continue;
+		}
+		entries.push(copyEntry(absolute, to, { skipNodeModules: true }));
+		localSlugs.push(slug);
 		recorded.push(`local:${slug}`);
 	}
-	// packages.txt 只记录本地包：npm/git 来源仍保留在导出的 settings.json 里，无需重复声明。
-	const localSlugs = recorded.filter((source) => source.startsWith("local:"));
 
 	// 2. 普通配置
 	for (const name of AGENT_FILES) {
@@ -234,17 +221,13 @@ export function exportConfig(options: ExportOptions): ExportResult {
 		if (existsSync(from)) entries.push(copyEntry(from, join(dest, "agent", name)));
 	}
 
-	// 2. 凭证
-	if (options.withSecrets) {
-		for (const name of SECRET_FILES) {
-			const from = join(agent, name);
-			if (existsSync(from)) entries.push(copyEntry(from, join(dest, "agent-secrets", name)));
-		}
-	} else {
-		skipped.push("凭证（--no-secrets）");
+	// 3. 凭证（明文，单独放一个目录方便处置）
+	for (const name of SECRET_FILES) {
+		const from = join(agent, name);
+		if (existsSync(from)) entries.push(copyEntry(from, join(dest, "agent-secrets", name)));
 	}
 
-	// 3. 共享 Agent Skills 目录
+	// 4. 共享 Agent Skills 目录
 	const shared = join(homedir(), ".agents");
 	if (existsSync(join(shared, ".skill-lock.json"))) {
 		entries.push(copyEntry(join(shared, ".skill-lock.json"), join(dest, "agents", ".skill-lock.json")));
@@ -253,15 +236,10 @@ export function exportConfig(options: ExportOptions): ExportResult {
 		entries.push(copyEntry(join(shared, "skills"), join(dest, "agents", "skills")));
 	}
 
-	// 4. 会话历史（可选）
-	const sessions = sessionDir(agent);
-	if (options.withSessions && existsSync(sessions)) {
-		entries.push(copyEntry(sessions, join(dest, "agent", "sessions")));
-	} else if (existsSync(sessions)) {
-		skipped.push("会话历史（--with-sessions 可包含）");
-	}
+	// 5. 会话历史永不导出
+	if (existsSync(join(agent, "sessions"))) skipped.push("会话历史（sessions/）");
 
-	// 5. 本地 package 需要在新机器上重新安装；npm/git 来源已在 settings.json 里
+	// 6. 本地 package 需要在新机器上重新安装；npm/git 来源已在 settings.json 里
 	if (localSlugs.length > 0) {
 		writeFileSync(
 			join(dest, "packages.txt"),
@@ -274,7 +252,7 @@ export function exportConfig(options: ExportOptions): ExportResult {
 		);
 	}
 
-	// 6. 还原脚本与说明
+	// 7. 还原脚本与说明
 	writeFileSync(join(dest, "restore.ps1"), RESTORE_PS1);
 	writeFileSync(join(dest, "README.md"), renderReadme(localSlugs));
 	writeFileSync(
@@ -282,7 +260,7 @@ export function exportConfig(options: ExportOptions): ExportResult {
 		`${JSON.stringify(
 			{
 				createdAt: new Date().toISOString(),
-				source: { agentDir: agent, sharedSkillsDir: shared, sessionsIncluded: options.withSessions, secretsIncluded: options.withSecrets },
+				source: { agentDir: agent, sharedSkillsDir: shared },
 				packages: recorded,
 				entries: entries.map(({ label, files, bytes }) => ({ label, files, bytes })),
 			},
@@ -360,7 +338,7 @@ ${packages.length > 0 ? `4. 重新安装本地 package：\`restore.ps1\` 会自�
 ## 注意
 
 - \`agent-secrets/\` 是明文 API key / OAuth token，勿提交公开仓库；也可以不用它，在新机器上重新登录。
-- 本包不含 \`bin/\`（平台相关二进制）与 \`sessions/\`（除非导出时加了 \`--with-sessions\`）。
+- 本包不含 \`bin/\`（平台相关二进制）与 \`sessions/\`（会话历史）。
 - 若新机器用 \`PI_CODING_AGENT_DIR\` 改了配置目录，请按该变量指向的位置还原。
 `;
 }
@@ -418,75 +396,20 @@ Write-Host ""
 Write-Host "完成。请运行: pi --version ; pi mcp list ; pi list"
 `;
 
-interface CommandOptions {
-	dest?: string;
-	withSecrets: boolean;
-	withSessions: boolean;
-	yes: boolean;
-}
-
-function parseArgs(raw: string): CommandOptions {
-	const options: CommandOptions = { withSecrets: true, withSessions: false, yes: false };
-	for (const token of raw.split(/\s+/).filter(Boolean)) {
-		if (token === "--with-sessions" || token === "--sessions") options.withSessions = true;
-		else if (token === "--no-secrets") options.withSecrets = false;
-		else if (token === "--yes" || token === "-y") options.yes = true;
-		else if (!token.startsWith("-")) {
-			if (options.dest) throw new Error(`多余的参数：${token}`);
-			options.dest = token;
-		} else throw new Error(`未知选项：${token}`);
-	}
-	return options;
-}
-
-const ARGUMENTS = [
-	{ value: "--with-sessions", label: "--with-sessions", description: "连会话历史一起导出" },
-	{ value: "--no-secrets", label: "--no-secrets", description: "不导出 API key / OAuth 凭证" },
-	{ value: "--yes", label: "--yes", description: "跳过确认" },
-];
-
 export default function migrateExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("migrate", {
-		description: "把本机 pi 配置导出为可迁移目录（不压缩）",
-		getArgumentCompletions: (prefix) =>
-			ARGUMENTS.filter((item) => item.value.startsWith(prefix)).map((item) => ({ ...item })),
+		description: "把本机 pi 配置导出到当前目录下的新文件夹（不压缩）",
 		handler: async (rawArgs, ctx: ExtensionCommandContext) => {
+			if (rawArgs.trim()) {
+				ctx.ui.notify("/migrate 不接受参数，在当前目录新建 pi-migrate-<时间戳>/ 导出", "error");
+				return;
+			}
 			if (process.platform !== "win32") {
 				ctx.ui.notify("/migrate 仅支持 Windows", "error");
 				return;
 			}
-
-			let options: CommandOptions;
 			try {
-				options = parseArgs(rawArgs);
-			} catch (error) {
-				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-				return;
-			}
-
-			const dest = options.dest ? resolve(options.dest) : join(homedir(), `pi-migrate-${stamp()}`);
-			if (isNonEmptyDir(dest)) {
-				ctx.ui.notify(`目标目录已存在且非空：${dest}`, "error");
-				return;
-			}
-
-			if (ctx.hasUI && !options.yes) {
-				const notes = [
-					`导出到：${dest}`,
-					options.withSecrets ? "包含凭证（auth.json / mcp-auth.json，明文）" : "不含凭证（新机器需重新登录）",
-					options.withSessions ? "包含会话历史" : "不含会话历史",
-					"不含 bin/（平台相关二进制）",
-				];
-				const confirmed = await ctx.ui.confirm("导出 pi 配置？", notes.join("\n"));
-				if (!confirmed) {
-					ctx.ui.notify("已取消，没有写入任何文件", "info");
-					return;
-				}
-			}
-
-			try {
-				const result = exportConfig({ dest, withSecrets: options.withSecrets, withSessions: options.withSessions });
-				ctx.ui.notify(`配置已导出到 ${result.dest}`, "info");
+				const result = exportConfig(join(ctx.cwd, exportDirName()));
 				// 只在对话里留一份清单，不触发模型回合。
 				await pi.sendMessage({ customType: "migrate", content: formatReport(result), display: true }, { triggerTurn: false });
 			} catch (error) {

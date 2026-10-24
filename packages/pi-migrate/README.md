@@ -1,50 +1,62 @@
 # pi-migrate
 
-给 pi 加一个 `/migrate`：把本机的 pi 配置导出成一个可直接拷走的目录（不压缩），新机器跑一次 `restore.ps1` 即可。
+为 pi 提供 `/migrate` 命令：一条命令把本机 pi 配置与数据导出到当前目录下新建的 `pi-migrate-<时间戳>/`，可直接拷贝到新机器，用 `restore.ps1` 一键还原。
 
-## 依赖
+默认行为（无参数、无确认）：
 
-- **仅 Windows**。非 Windows 上 `/migrate` 只提示不执行。
-- pi 本身（Node >= 22.19），无额外 npm 依赖。
-- TUI 里会弹确认框，`--yes` 跳过；新机器还原用 PowerShell 5.1+。
+- 在当前工作目录下新建 `pi-migrate-yyyyMMdd-HHmmss/` 存放导出内容（不污染当前目录）
+- 导出凭证（`auth.json` / `mcp-auth.json`，明文）
+- 不导出聊天会话历史
+- 不弹二次确认
+
+## 依赖与环境
+
+- **操作系统**：Windows（还原脚本基于 PowerShell）。
+- **Node.js**：Node >= 22.19。
+- **还原工具**：PowerShell 5.1+ 或 pwsh。
 
 ## 用法
 
 ```text
-/migrate                     导出到 ~/pi-migrate-<时间戳>/
-/migrate --with-sessions     连会话历史一起导出
-/migrate --no-secrets        不导出 auth.json / mcp-auth.json
-/migrate --yes               跳过确认
-/migrate D:\pi-export        指定导出目录（必须不存在或为空）
+/migrate
 ```
 
-导出结构：
+不接受任何参数（追加参数会报错）。输出示例：
+
+```text
+C:\some\project\pi-migrate-20261024-212415\
+└── ...
+```
+
+该子目录不存在时自动创建；若导出目录与本地安装的 pi package 源码重叠（比如就在包的仓库里执行），该本地包会被跳过并提示手动拷贝。
+
+## 导出结构
 
 ```text
 <dest>/
 ├── agent/           ~/.pi/agent 配置与资源（settings、MCP、models、扩展、skills、提示词、主题…）
-├── agent-secrets/   auth.json、mcp-auth.json（明文凭证，别外传）
+├── agent-secrets/   auth.json、mcp-auth.json（明文凭证，请妥善保管）
 ├── agents/          ~/.agents 共享 skills
-├── packages-local/  本地路径安装的 package 源码（不含 node_modules / .git）
-├── packages.txt     需要重装的本地包清单
-├── restore.ps1      一键还原（PowerShell 5.1+ / pwsh）
+├── packages-local/  本地路径安装的 package 源码（排除 node_modules / .git）
+├── packages.txt     本地包重装清单
+├── restore.ps1      一键还原脚本（PowerShell 5.1+）
 ├── manifest.json    导出清单
-└── README.md        新机器操作步骤
+└── README.md        新机器操作指南
 ```
 
-默认不含 `bin/`（平台相关二进制）和会话历史。导出的 `settings.json` 会剔掉旧机器的本地包路径，由还原脚本重新 `pi install`。
+不含 `bin/` 平台二进制与 `sessions/` 会话历史。导出的 `settings.json` 会自动剥离旧机的本地包绝对路径，由还原脚本重新 `pi` 安装。
 
-还原时同名文件先备份为 `*.bak-<时间戳>`，再复制：
+还原时，同名文件会先备份为 `*.bak-<timestamp>` 再覆盖：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\restore.ps1   # 加 -DryRun 只看不写
+powershell -ExecutionPolicy Bypass -File .\restore.ps1   # 附加 -DryRun 参数可预演预览
 ```
 
 ## 安装
 
 ```bash
-pi install ./packages/pi-migrate     # 单装（仓库根也有聚合包）
-pi list                              # 确认已注册
+pi install ./packages/pi-migrate     # 单独安装（也可通过根目录聚合包整体安装）
+pi list                              # 验证注册状态
 ```
 
-开发调试：`node scripts/dev-run.ts /tmp/test-export`（只跑导出逻辑，不启动 pi）。
+本地开发调试：`node scripts/dev-run.ts <目录>`（仅执行导出逻辑，不启动 pi）。

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Export this machine's pi setup (settings, MCP, models, extensions, skills, packages) into a portable directory via /migrate. Windows only.",
+  "description": "Export this machine's pi setup (settings, MCP, models, extensions, skills, packages, credentials) into the current directory via /migrate. Windows only.",
   "keywords": ["pi-package"],
   "license": "MIT",
   "pi": {

@@ -1,11 +1,11 @@
 # pi-clear
 
-给 pi 加一个 `/clear`：把当前会话文件移进 Windows 回收站，然后开一个新会话。
+为 pi 提供 `/clear` 命令：将当前会话文件移动至 Windows 回收站，并新建一个空会话。
 
-## 依赖
+## 运行环境
 
-- **仅 Windows**。通过 `Microsoft.VisualBasic.FileIO.FileSystem` 走 `SHFileOperation`，文件真的进回收站、可还原。
-- 需要可交互的 TUI（会弹确认框）。非 Windows 或非 TUI 环境只提示不执行。
+- **操作系统**：Windows（依赖 Windows 文件系统回收站 API）。
+- **运行模式**：需要可交互的 TUI（支持确认提示框）。非 TUI 环境下将提示并不执行。
 
 ## 用法
 
@@ -13,10 +13,10 @@
 /clear
 ```
 
-确认后：旧会话文件进回收站 → 立即新建空会话。取消则什么都不做。
+确认后：旧会话移入回收站 → 立即创建新会话。取消则无任何操作。
 
 ## 安装
 
 ```bash
-pi install ./packages/pi-clear        # 单装（仓库根也有聚合包）
+pi install ./packages/pi-clear        # 单独安装（也可通过根目录聚合包整体安装）
 ```
